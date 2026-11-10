@@ -344,6 +344,10 @@ export class ipcoBox extends ContainerBox {
   irots: Array<irotBox> = [];
   subBoxNames = ['hvcC', 'ispe', 'clap', 'irot'] as const;
 }
+export class lpcoBox extends ContainerBox {
+  static override readonly fourcc = 'lpco' as const;
+  box_name = 'LayerPropertyContainerBox' as const;
+}
 export class grplBox extends ContainerBox {
   static override readonly fourcc = 'grpl' as const;
   box_name = 'GroupsListBox' as const;

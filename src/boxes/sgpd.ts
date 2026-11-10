@@ -18,6 +18,7 @@ export class sgpdBox extends FullBox {
     | 'rap'
     | 'rash'
     | 'roll'
+    | 'sap '
     | 'scif'
     | 'scnm'
     | 'seig'
@@ -38,7 +39,7 @@ export class sgpdBox extends FullBox {
     this.parseFullHeader(stream);
     this.grouping_type = stream.readString(4);
     Log.debug('BoxParser', 'Found Sample Groups of type ' + this.grouping_type);
-    if (this.version === 1) {
+    if (this.version >= 1) {
       this.default_length = stream.readUint32();
     } else {
       this.default_length = 0;
@@ -56,7 +57,7 @@ export class sgpdBox extends FullBox {
         entry = new SampleGroupEntry(this.grouping_type);
       }
       this.entries.push(entry);
-      if (this.version === 1) {
+      if (this.version >= 1) {
         if (this.default_length === 0) {
           entry.description_length = stream.readUint32();
         } else {
@@ -89,7 +90,7 @@ export class sgpdBox extends FullBox {
     this.size = 12;
     for (let i = 0; i < this.entries.length; i++) {
       const entry = this.entries[i];
-      if (this.version === 1) {
+      if (this.version >= 1) {
         if (this.default_length === 0) {
           this.size += 4;
         }
@@ -98,16 +99,18 @@ export class sgpdBox extends FullBox {
     }
     this.writeHeader(stream);
     stream.writeString(this.grouping_type, undefined, 4);
-    if (this.version === 1) {
+    if (this.version >= 1) {
       stream.writeUint32(this.default_length);
     }
     if (this.version >= 2) {
-      stream.writeUint32(this.default_sample_description_index);
+      stream.writeUint32(
+        this.default_group_description_index ?? this.default_sample_description_index,
+      );
     }
     stream.writeUint32(this.entries.length);
     for (let i = 0; i < this.entries.length; i++) {
       const entry = this.entries[i];
-      if (this.version === 1) {
+      if (this.version >= 1) {
         if (this.default_length === 0) {
           stream.writeUint32(entry.description_length);
         }

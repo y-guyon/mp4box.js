@@ -4755,10 +4755,8 @@ var av2CBox = class extends Box {
   }
   parse(stream) {
     const boxEnd = this.start + this.size;
-    stream.enterBitMode();
-    this.reserved1 = stream.readBits(7);
-    this.config_obus_count_minus1 = stream.readBits(9);
-    stream.exitBitMode();
+    this.reserved1 = stream.readUint8();
+    this.config_obus_count_minus1 = stream.readUint8();
     if (this.reserved1 !== 0) {
       Log.error("BoxParser", "av2C reserved1 parsing problem", stream.isofile);
     }
@@ -4807,6 +4805,20 @@ var av2CBox = class extends Box {
             }
             entry.chroma_format_idc = stream.readUE();
             entry.bit_depth_idc = stream.readUE();
+          } catch {
+          } finally {
+            while (stream.inBitMode) {
+              stream.exitBitMode(false);
+            }
+          }
+        } else if (entry.obu_type === 20 && payloadLen >= 2) {
+          stream.seek(payloadStart);
+          try {
+            stream.enterBitMode();
+            entry.num_streams = stream.readBits(3) + 2;
+            entry.multistream_profile_idc = stream.readBits(5);
+            entry.multistream_level_idx = stream.readBits(5);
+            entry.multistream_tier = stream.readBits(1);
           } catch {
           } finally {
             while (stream.inBitMode) {
@@ -5598,6 +5610,7 @@ var av01SampleEntry = class extends VisualSampleEntry {
   }
 };
 var av2Base32Char = (value) => (value & 31).toString(32).toUpperCase();
+var av2TierChar = (tier) => tier ? "H" : "M";
 function combineAv2Profiles(a, b) {
   if (a === b) return a;
   const lo = Math.min(a, b);
@@ -5646,7 +5659,17 @@ var av2ESampleEntry = class extends VisualSampleEntry {
         maxBitDepthIdc = bd;
       }
     }
-    return `${baseCodec}.${av2Base32Char(maxProfile)}${av2Base32Char(maxLevel)}${av2Base32Char(
+    const msdos = this.av2C?.entries?.filter(
+      (e) => e.obu_type === 20 && e.multistream_profile_idc !== void 0
+    );
+    if (msdos) {
+      for (const m of msdos) {
+        maxProfile = combineAv2Profiles(maxProfile, m.multistream_profile_idc ?? 0);
+        maxLevel = Math.max(maxLevel, m.multistream_level_idx ?? 0);
+        maxTier = Math.max(maxTier, m.multistream_tier ?? 0);
+      }
+    }
+    return `${baseCodec}.${av2Base32Char(maxProfile)}${av2Base32Char(maxLevel)}${av2TierChar(
       maxTier
     )}${av2Base32Char(maxBitDepthIdc)}`;
   }
@@ -5667,7 +5690,7 @@ var av2eSampleEntry = class extends VisualSampleEntry {
     }
     return `${baseCodec}.${av2Base32Char(this.av2c.max_profile_idc)}${av2Base32Char(
       this.av2c.max_level_idx
-    )}${av2Base32Char(this.av2c.max_tier)}${av2Base32Char(this.av2c.max_bit_depth_idc)}`;
+    )}${av2TierChar(this.av2c.max_tier)}${av2Base32Char(this.av2c.max_bit_depth_idc)}`;
   }
 };
 var avs3SampleEntry = class extends VisualSampleEntry {

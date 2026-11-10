@@ -45,6 +45,10 @@ class av2CConfigOBU extends Box {
   seq_tier?: number;
   chroma_format_idc?: number;
   bit_depth_idc?: number;
+  num_streams?: number;
+  multistream_profile_idc?: number;
+  multistream_level_idx?: number;
+  multistream_tier?: number;
 }
 
 function readLeb128(stream: MultiBufferStream, endPos: number): number {
@@ -70,10 +74,8 @@ export class av2CBox extends Box {
 
   parse(stream: MultiBufferStream) {
     const boxEnd = this.start + this.size;
-    stream.enterBitMode();
-    this.reserved1 = stream.readBits(7);
-    this.config_obus_count_minus1 = stream.readBits(9);
-    stream.exitBitMode();
+    this.reserved1 = stream.readUint8();
+    this.config_obus_count_minus1 = stream.readUint8();
 
     if (this.reserved1 !== 0) {
       Log.error('BoxParser', 'av2C reserved1 parsing problem', stream.isofile);
@@ -132,6 +134,21 @@ export class av2CBox extends Box {
             entry.bit_depth_idc = stream.readUE();
           } catch {
             // Ignore partial SequenceHeaderOBU parse errors in truncated inputs.
+          } finally {
+            while (stream.inBitMode) {
+              stream.exitBitMode(false);
+            }
+          }
+        } else if (entry.obu_type === 20 && payloadLen >= 2) {
+          stream.seek(payloadStart);
+          try {
+            stream.enterBitMode();
+            entry.num_streams = stream.readBits(3) + 2;
+            entry.multistream_profile_idc = stream.readBits(5);
+            entry.multistream_level_idx = stream.readBits(5);
+            entry.multistream_tier = stream.readBits(1);
+          } catch {
+            // Ignore partial MSDO parse errors in truncated inputs.
           } finally {
             while (stream.inBitMode) {
               stream.exitBitMode(false);

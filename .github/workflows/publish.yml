@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - pages
 
 permissions:
   contents: read
@@ -19,7 +20,7 @@ jobs:
     uses: ./.github/workflows/test.yml
 
   publish:
-    if: github.repository == 'gpac/mp4box.js'
+    if: github.repository == 'gpac/mp4box.js' || github.repository == 'y-guyon/mp4box.js'
     name: release
     needs: test
     runs-on: ubuntu-latest

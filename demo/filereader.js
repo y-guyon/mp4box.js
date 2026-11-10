@@ -24,6 +24,7 @@ function finalizeAnalyzerUI(fileobj, loadbutton, success) {
   loadbutton.button('enable');
   if (success) {
     createBoxView();
+    buildAssociationView(fileobj.mp4boxfile);
     buildItemTable(fileobj.mp4boxfile.items);
     buildSampleView();
     displayMovieInfo(fileobj.mp4boxfile.getInfo(), document.getElementById('movieview'), false);
@@ -31,12 +32,1639 @@ function finalizeAnalyzerUI(fileobj, loadbutton, success) {
     buildEntityGroupTable(fileobj.mp4boxfile.entity_groups);
   } else {
     resetBoxView();
+    $('#associationview').html('');
     $('#itemview').html('');
     resetSampleView();
     $('#movieview').html('');
     resetSegmentView();
     $('#entitygroupview').html('');
   }
+}
+
+function peekBytesFromFile(mp4boxfile, offset, size) {
+  var i, buf, mdat, mdatStart;
+  if (!mp4boxfile || !size || size <= 0) return null;
+  if (mp4boxfile.stream && mp4boxfile.stream.buffers) {
+    for (i = 0; i < mp4boxfile.stream.buffers.length; i++) {
+      buf = mp4boxfile.stream.buffers[i];
+      if (buf.fileStart <= offset && offset + size <= buf.fileStart + buf.byteLength) {
+        return new Uint8Array(buf, offset - buf.fileStart, size);
+      }
+    }
+  }
+  if (mp4boxfile.mdats) {
+    for (i = 0; i < mp4boxfile.mdats.length; i++) {
+      mdat = mp4boxfile.mdats[i];
+      mdatStart = mdat.start + mdat.hdr_size;
+      if (mdat.data && mdatStart <= offset && offset + size <= mdat.start + mdat.size) {
+        return mdat.data.subarray(offset - mdatStart, offset - mdatStart + size);
+      }
+      if (mdat.stream && mdat.stream.buffers) {
+        for (var j = 0; j < mdat.stream.buffers.length; j++) {
+          buf = mdat.stream.buffers[j];
+          var bStart = mdatStart + buf.fileStart;
+          if (bStart <= offset && offset + size <= bStart + buf.byteLength) {
+            return new Uint8Array(buf, offset - bStart, size);
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseLpcoBoxesFallback(lpcoBox) {
+  if (!lpcoBox) return [];
+  if (lpcoBox.boxes && lpcoBox.boxes.length > 0) return lpcoBox.boxes;
+  var data = lpcoBox.data;
+  if (!data || data.length < 8) return [];
+  var boxes = [];
+  var pos = 0;
+  while (pos + 8 <= data.length) {
+    var sz =
+      ((data[pos] << 24) >>> 0) +
+      ((data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
+    var type = String.fromCharCode(data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]);
+    if (sz < 8 || pos + sz > data.length) break;
+    boxes.push({ type: type, size: sz, start: (lpcoBox.start || 0) + (lpcoBox.hdr_size || 8) + pos });
+    pos += sz;
+  }
+  return boxes;
+}
+
+function parseLpmaFallback(lpmaBox) {
+  if (!lpmaBox) return null;
+  if (lpmaBox.entries) {
+    return { flags: lpmaBox.flags || 0, entries: lpmaBox.entries };
+  }
+  var data = lpmaBox.data;
+  if (!data || data.length < 6) return null;
+  var flags = (data[1] << 16) | (data[2] << 8) | data[3];
+  var entryCount = (data[4] << 8) | data[5];
+  var pos = 6;
+  var entries = [];
+  for (var i = 0; i < entryCount && pos + 5 <= data.length; i++) {
+    var targetId =
+      ((data[pos] << 24) >>> 0) +
+      ((data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
+    var assocCount = data[pos + 4];
+    pos += 5;
+    var associations = [];
+    for (var j = 0; j < assocCount && pos < data.length; j++) {
+      var b0 = data[pos++];
+      var essential = (b0 >> 7) & 1;
+      var source = (b0 >> 6) & 1;
+      var high6 = b0 & 0x3f;
+      if (source === 0) {
+        var propIndex = high6;
+        if (flags & 2) {
+          if (pos >= data.length) break;
+          propIndex = (high6 << 8) | data[pos++];
+        }
+        associations.push({ essential: essential, source: 0, property_index: propIndex });
+      } else {
+        if (pos + 4 > data.length) break;
+        var fourcc = String.fromCharCode(data[pos], data[pos + 1], data[pos + 2], data[pos + 3]);
+        pos += 4;
+        associations.push({ essential: essential, source: 1, property_4cc: fourcc });
+      }
+    }
+    entries.push({ target_id: targetId, associations: associations });
+  }
+  return { flags: flags, entries: entries };
+}
+
+function detectTrackLayers(mp4boxfile, trak) {
+  var entries =
+    (trak.mdia &&
+      trak.mdia.minf &&
+      trak.mdia.minf.stbl &&
+      trak.mdia.minf.stbl.stsd &&
+      trak.mdia.minf.stbl.stsd.entries) ||
+    [];
+  var isAv2 = false;
+  var i, j, se;
+  for (i = 0; i < entries.length; i++) {
+    se = entries[i];
+    if (se.type === 'av2E' || se.type === 'av2e' || se.av2C || se.av2c) {
+      isAv2 = true;
+    } else if (se.boxes) {
+      for (j = 0; j < se.boxes.length; j++) {
+        if (se.boxes[j].type === 'av2C' || se.boxes[j].type === 'av2c') {
+          isAv2 = true;
+          break;
+        }
+      }
+    }
+  }
+
+  var layers = [];
+  if (isAv2) {
+    var pairMap = {};
+    function addPair(x, m) {
+      if (x < 0 || x >= 31 || m < 0 || m >= 8) return;
+      var key = x + ':' + m;
+      if (!pairMap[key]) {
+        pairMap[key] = { x: x, m: m };
+      }
+    }
+    function scanAv2Obus(bytes) {
+      if (!bytes || !bytes.length) return;
+      var pos = 0;
+      while (pos < bytes.length) {
+        var val = 0;
+        var shift = 0;
+        var idx = pos;
+        var ok = false;
+        for (var k = 0; k < 8 && idx < bytes.length; k++) {
+          var b = bytes[idx++];
+          val |= (b & 0x7f) << shift;
+          if ((b & 0x80) === 0) {
+            ok = true;
+            break;
+          }
+          shift += 7;
+        }
+        if (!ok || val <= 0 || idx + val > bytes.length) break;
+        var obuStart = idx;
+        var obuEnd = idx + val;
+        pos = obuEnd;
+
+        var hdrByte1 = bytes[obuStart];
+        var hasExt = (hdrByte1 >> 7) & 1;
+        var obuType = (hdrByte1 >> 2) & 0x1f;
+        var xlayerId = 0;
+        var mlayerId = 0;
+        var payloadStart = obuStart + 1;
+        if (hasExt) {
+          if (obuStart + 1 >= obuEnd) continue;
+          var hdrByte2 = bytes[obuStart + 1];
+          mlayerId = (hdrByte2 >> 5) & 0x7;
+          xlayerId = hdrByte2 & 0x1f;
+          payloadStart = obuStart + 2;
+        }
+        if (obuType === 1) {
+          if (xlayerId < 31) addPair(xlayerId, 0);
+        } else if (obuType === 16 && payloadStart < obuEnd) {
+          var bitPos = 0;
+          function rBit() {
+            var byteIdx = payloadStart + (bitPos >> 3);
+            if (byteIdx >= obuEnd) return 0;
+            var v = (bytes[byteIdx] >> (7 - (bitPos & 7))) & 1;
+            bitPos++;
+            return v;
+          }
+          function rBits(n) {
+            var v = 0;
+            for (var bi = 0; bi < n; bi++) v = v * 2 + rBit();
+            return v;
+          }
+          function rUvlc() {
+            var lz = 0;
+            while (lz < 32) {
+              if (rBit() === 1) break;
+              lz++;
+            }
+            if (lz === 0) return 0;
+            if (lz >= 32) return 0xffffffff;
+            return rBits(lz) + Math.pow(2, lz) - 1;
+          }
+          function rRg(n) {
+            for (var q = 0; q < 32; q++) {
+              if (rBit() === 0) {
+                return (q << n) + rBits(n);
+              }
+            }
+            return 0;
+          }
+          function byteAlign() {
+            while ((bitPos & 7) !== 0) bitPos++;
+          }
+          function rLeb128() {
+            byteAlign();
+            var valL = 0;
+            var shiftL = 0;
+            for (var li = 0; li < 8; li++) {
+              var bL = rBits(8);
+              valL |= (bL & 0x7f) << shiftL;
+              if ((bL & 0x80) === 0) break;
+              shiftL += 7;
+            }
+            return valL >>> 0;
+          }
+          function parseXlayerInfo(xlid) {
+            var repPresent = rBit();
+            var purposePresent = rBit();
+            var colorPresent = rBit();
+            var embPresent = rBit();
+            if (repPresent) {
+              rUvlc();
+              rUvlc();
+              var fmtPresent = rBit();
+              var cropPresent = rBit();
+              if (fmtPresent) {
+                rUvlc();
+                rUvlc();
+              }
+              if (cropPresent) {
+                rUvlc();
+                rUvlc();
+                rUvlc();
+                rUvlc();
+              }
+            }
+            if (purposePresent) rBits(7);
+            if (colorPresent) {
+              var cidc = rRg(2);
+              if (cidc === 0) rBits(24);
+              rBit();
+            }
+            byteAlign();
+            if (embPresent) {
+              var mlayerMap = rBits(8);
+              if (mlayerMap === 0) {
+                addPair(xlid, 0);
+              } else {
+                for (var mi = 0; mi < 8; mi++) {
+                  if ((mlayerMap >> mi) & 1) addPair(xlid, mi);
+                }
+              }
+            } else {
+              addPair(xlid, 0);
+            }
+          }
+
+          if (xlayerId === 31) {
+            rBits(3);
+            var xmap = rBits(31);
+            var xlayers = [];
+            for (var xi = 0; xi < 31; xi++) {
+              if (Math.floor(xmap / Math.pow(2, xi)) % 2 === 1) {
+                xlayers.push(xi);
+                addPair(xi, 0);
+              }
+            }
+            var aggPresent = rBit();
+            var ptlPresent = rBit();
+            var globalPayloadPresent = rBit();
+            var depXlayers = rBit();
+            rBit();
+            rBits(7);
+            rBit();
+            rBit();
+            rBits(3);
+            rBits(5);
+            if (aggPresent) rBits(16);
+            if (ptlPresent) {
+              for (var xi2 = 0; xi2 < xlayers.length; xi2++) rBits(16);
+            }
+            if (globalPayloadPresent) {
+              for (var xi3 = 0; xi3 < xlayers.length; xi3++) {
+                var dSize = rLeb128();
+                var subStart = bitPos;
+                if (depXlayers && xlayers[xi3] > 0) rBits(xlayers[xi3]);
+                parseXlayerInfo(xlayers[xi3]);
+                bitPos = subStart + dSize * 8;
+              }
+            }
+          } else {
+            addPair(xlayerId, 0);
+            rBits(3);
+            rBits(3);
+            var localPtl = rBit();
+            rBit();
+            if (localPtl) rBits(16);
+            rBits(3);
+            rBits(5);
+            parseXlayerInfo(xlayerId);
+          }
+        } else if (
+          obuType === 3 ||
+          obuType === 4 ||
+          obuType === 5 ||
+          obuType === 6 ||
+          obuType === 7 ||
+          obuType === 10 ||
+          obuType === 11 ||
+          obuType === 12 ||
+          obuType === 13 ||
+          obuType === 14 ||
+          obuType === 19 ||
+          obuType === 21
+        ) {
+          if (xlayerId < 31) addPair(xlayerId, mlayerId);
+        }
+      }
+    }
+
+    for (i = 0; i < entries.length; i++) {
+      se = entries[i];
+      var av2C = se.av2C;
+      if (!av2C && se.boxes) {
+        for (j = 0; j < se.boxes.length; j++) {
+          if (se.boxes[j].type === 'av2C') {
+            av2C = se.boxes[j];
+            break;
+          }
+        }
+      }
+      if (av2C) {
+        if (av2C.config_obus) {
+          scanAv2Obus(av2C.config_obus);
+        } else if (av2C.data && av2C.data.length > 2) {
+          scanAv2Obus(av2C.data.subarray(2));
+        }
+      }
+    }
+
+    if (trak.samples && trak.samples.length > 0) {
+      var maxSamples = Math.min(trak.samples.length, 30);
+      for (i = 0; i < maxSamples; i++) {
+        var sample = trak.samples[i];
+        var sBytes = sample.data || peekBytesFromFile(mp4boxfile, sample.offset, sample.size);
+        if (sBytes) scanAv2Obus(sBytes);
+      }
+    }
+
+    var pairKeys = Object.keys(pairMap);
+    if (pairKeys.length === 0) {
+      addPair(0, 0);
+      pairKeys = Object.keys(pairMap);
+    }
+    var pairs = pairKeys.map(function (k) {
+      return pairMap[k];
+    });
+    pairs.sort(function (a, b) {
+      return a.x - b.x || a.m - b.m;
+    });
+    for (i = 0; i < pairs.length; i++) {
+      layers.push({
+        id: i,
+        x: pairs[i].x,
+        m: pairs[i].m,
+        label: 'Layer #' + i + ' (x=' + pairs[i].x + ', m=' + pairs[i].m + ')',
+      });
+    }
+  }
+
+  // Also check lpma on any sample entry for layer IDs
+  for (i = 0; i < entries.length; i++) {
+    se = entries[i];
+    var lpmaBox = se.lpma;
+    if (!lpmaBox && se.boxes) {
+      for (j = 0; j < se.boxes.length; j++) {
+        if (se.boxes[j].type === 'lpma') {
+          lpmaBox = se.boxes[j];
+          break;
+        }
+      }
+    }
+    var lpma = parseLpmaFallback(lpmaBox);
+    if (lpma && lpma.entries && lpma.entries.length > 0) {
+      var targetType = lpma.flags & 1;
+      if (!isAv2 && layers.length === 0) {
+        layers.push({ id: 0, label: 'Layer #0' });
+      }
+      if (targetType === 0) {
+        for (j = 0; j < lpma.entries.length; j++) {
+          var tid = lpma.entries[j].target_id;
+          var exists = false;
+          for (var li = 0; li < layers.length; li++) {
+            if (layers[li].id === tid) {
+              exists = true;
+              break;
+            }
+          }
+          if (!exists) {
+            layers.push({ id: tid, label: 'Layer #' + tid });
+          }
+        }
+      }
+    }
+  }
+
+  // Also check 'sap ' sample groups for layer IDs
+  var sbgps =
+    (trak.mdia &&
+      trak.mdia.minf &&
+      trak.mdia.minf.stbl &&
+      trak.mdia.minf.stbl.sbgps) ||
+    [];
+  for (i = 0; i < sbgps.length; i++) {
+    var sbgp = sbgps[i];
+    if (sbgp.grouping_type === 'sap ' && sbgp.grouping_type_parameter) {
+      var sapMethod = sbgp.grouping_type_parameter & 0xf;
+      var sapTarget = (sbgp.grouping_type_parameter >>> 4) & 0x0fffffff;
+      var sapLayerIds = [];
+      if (sapMethod === 1) {
+        sapLayerIds.push(0, sapTarget);
+      } else if (sapMethod === 2) {
+        for (j = 0; j < 28; j++) {
+          if ((sapTarget >>> j) & 1) sapLayerIds.push(j);
+        }
+      }
+      for (j = 0; j < sapLayerIds.length; j++) {
+        var slid = sapLayerIds[j];
+        var sExists = false;
+        for (var sli = 0; sli < layers.length; sli++) {
+          if (layers[sli].id === slid) {
+            sExists = true;
+            break;
+          }
+        }
+        if (!sExists) {
+          layers.push({ id: slid, label: 'Layer #' + slid });
+        }
+      }
+    }
+  }
+
+  layers.sort(function (a, b) {
+    return a.id - b.id;
+  });
+  return { isAv2: isAv2, layers: layers };
+}
+
+function attachAssociationHover(svg) {
+  var nodes = svg.selectAll('.assoc-node');
+  var arrows = svg.selectAll('.assoc-edge');
+
+  nodes
+    .on('mouseenter', function () {
+      var nodeId = d3.select(this).attr('data-node-id');
+      if (!nodeId) return;
+      var connectedNodes = {};
+      connectedNodes[nodeId] = true;
+      arrows.each(function () {
+        var edge = d3.select(this);
+        var fromId = edge.attr('data-from');
+        var toId = edge.attr('data-to');
+        var parentFrom = edge.attr('data-parent-from');
+        var parentTo = edge.attr('data-parent-to');
+        var match =
+          fromId === nodeId ||
+          toId === nodeId ||
+          parentFrom === nodeId ||
+          parentTo === nodeId;
+        if (match) {
+          connectedNodes[fromId] = true;
+          connectedNodes[toId] = true;
+          if (parentFrom) connectedNodes[parentFrom] = true;
+          if (parentTo) connectedNodes[parentTo] = true;
+          edge.style('opacity', 1).select('path').style('stroke-width', '2.8px');
+        } else {
+          edge.style('opacity', 0.18);
+        }
+      });
+      nodes.each(function () {
+        var n = d3.select(this);
+        var nid = n.attr('data-node-id');
+        n.style('opacity', connectedNodes[nid] ? 1 : 0.45);
+      });
+    })
+    .on('mouseleave', function () {
+      arrows.style('opacity', 1).select('path').style('stroke-width', function () {
+        return d3.select(this).attr('data-default-width') || '1.6px';
+      });
+      nodes.style('opacity', 1);
+    });
+
+  arrows
+    .on('mouseenter', function () {
+      var activeEdge = this;
+      var edgeSel = d3.select(this);
+      var fromId = edgeSel.attr('data-from');
+      var toId = edgeSel.attr('data-to');
+      arrows.each(function () {
+        if (this === activeEdge) {
+          d3.select(this).style('opacity', 1).select('path').style('stroke-width', '2.8px');
+        } else {
+          d3.select(this).style('opacity', 0.18);
+        }
+      });
+      nodes.each(function () {
+        var n = d3.select(this);
+        var nid = n.attr('data-node-id');
+        n.style('opacity', nid === fromId || nid === toId ? 1 : 0.45);
+      });
+    })
+    .on('mouseleave', function () {
+      arrows.style('opacity', 1).select('path').style('stroke-width', function () {
+        return d3.select(this).attr('data-default-width') || '1.6px';
+      });
+      nodes.style('opacity', 1);
+    });
+}
+
+function buildTracksAssociationSvg(container, mp4boxfile) {
+  var traks = (mp4boxfile.moov && mp4boxfile.moov.traks) || [];
+  if (traks.length === 0) return;
+
+  var trackModels = [];
+  var hasTref = false;
+  var i, j, k;
+
+  for (i = 0; i < traks.length; i++) {
+    var trak = traks[i];
+    var trackId = trak.tkhd ? trak.tkhd.track_id : i + 1;
+    var handler = trak.mdia && trak.mdia.hdlr ? trak.mdia.hdlr.handler : '';
+    var stsdEntries =
+      (trak.mdia &&
+        trak.mdia.minf &&
+        trak.mdia.minf.stbl &&
+        trak.mdia.minf.stbl.stsd &&
+        trak.mdia.minf.stbl.stsd.entries) ||
+      [];
+    var detected = detectTrackLayers(mp4boxfile, trak);
+    var layers = detected.layers;
+    var isAv2 = detected.isAv2;
+
+    var refs = [];
+    if (trak.tref && trak.tref.references) {
+      for (j = 0; j < trak.tref.references.length; j++) {
+        var refBox = trak.tref.references[j];
+        var ids = refBox.track_ids || [];
+        for (k = 0; k < ids.length; k++) {
+          refs.push({ type: refBox.type, toTrackId: ids[k] });
+          hasTref = true;
+        }
+      }
+    }
+
+    var seModels = [];
+    for (j = 0; j < stsdEntries.length; j++) {
+      var se = stsdEntries[j];
+      var childBoxes = se.boxes || [];
+      var lpcoBox = se.lpco;
+      var lpmaBox = se.lpma;
+      for (k = 0; k < childBoxes.length; k++) {
+        if (childBoxes[k].type === 'lpco' && !lpcoBox) lpcoBox = childBoxes[k];
+        if (childBoxes[k].type === 'lpma' && !lpmaBox) lpmaBox = childBoxes[k];
+      }
+      var lpma = parseLpmaFallback(lpmaBox);
+      var lpcoChildren = parseLpcoBoxesFallback(lpcoBox);
+      var targetType = lpma ? lpma.flags & 1 : 0;
+
+      function resolveTargetLayerIds(targetId) {
+        var matched = [];
+        var li;
+        if (targetType === 0) {
+          for (li = 0; li < layers.length; li++) {
+            if (layers[li].id === targetId) matched.push(layers[li].id);
+          }
+        } else {
+          for (li = 0; li < layers.length; li++) {
+            if (li < 31 && ((targetId >>> li) & 1) === 1) {
+              matched.push(layers[li].id);
+            }
+          }
+          if (matched.length === 0) {
+            for (li = 0; li < layers.length; li++) matched.push(layers[li].id);
+          }
+        }
+        return matched;
+      }
+
+      var directBoxes = [];
+      for (k = 0; k < childBoxes.length; k++) {
+        var cb = childBoxes[k];
+        if (!cb || cb.type === 'lpco' || cb.type === 'lpma' || cb.type === 'free' || cb.type === 'skip') {
+          continue;
+        }
+        var targetLayerIds = [];
+        function addTargetLayerId(lid) {
+          if (targetLayerIds.indexOf(lid) === -1) targetLayerIds.push(lid);
+        }
+        if (layers.length > 0) {
+          if (cb.type === 'av2C' || cb.type === 'av2c' || cb.type === 'lhvC' || cb.type === 'lvcC') {
+            for (var li1 = 0; li1 < layers.length; li1++) addTargetLayerId(layers[li1].id);
+          } else if (isAv2) {
+            for (var li2 = 0; li2 < layers.length; li2++) {
+              if (layers[li2].x === 0) addTargetLayerId(layers[li2].id);
+            }
+            if (targetLayerIds.length === 0) addTargetLayerId(layers[0].id);
+          } else {
+            addTargetLayerId(layers[0].id);
+          }
+          if (lpma && lpma.entries) {
+            for (var ei = 0; ei < lpma.entries.length; ei++) {
+              var ent = lpma.entries[ei];
+              var assocs = ent.associations || [];
+              for (var ai = 0; ai < assocs.length; ai++) {
+                if (assocs[ai].source === 1 && assocs[ai].property_4cc === cb.type) {
+                  var rIds = resolveTargetLayerIds(ent.target_id);
+                  for (var ri = 0; ri < rIds.length; ri++) addTargetLayerId(rIds[ri]);
+                }
+              }
+            }
+          }
+        }
+        directBoxes.push({
+          type: cb.type,
+          label: cb.type,
+          isLpco: false,
+          targetLayerIds: targetLayerIds,
+        });
+      }
+
+      var lpcoPropBoxes = [];
+      for (k = 0; k < lpcoChildren.length; k++) {
+        var pb = lpcoChildren[k];
+        if (!pb || pb.type === 'free' || pb.type === 'skip') continue;
+        var propIdx1 = k + 1;
+        var pTargetIds = [];
+        function addPTargetId(lid) {
+          if (pTargetIds.indexOf(lid) === -1) pTargetIds.push(lid);
+        }
+        if (lpma && lpma.entries) {
+          for (var ei2 = 0; ei2 < lpma.entries.length; ei2++) {
+            var ent2 = lpma.entries[ei2];
+            var assocs2 = ent2.associations || [];
+            for (var ai2 = 0; ai2 < assocs2.length; ai2++) {
+              if (
+                assocs2[ai2].source === 0 &&
+                (assocs2[ai2].property_index === 0 || assocs2[ai2].property_index === propIdx1)
+              ) {
+                var rIds2 = resolveTargetLayerIds(ent2.target_id);
+                for (var ri2 = 0; ri2 < rIds2.length; ri2++) addPTargetId(rIds2[ri2]);
+              }
+            }
+          }
+        }
+        lpcoPropBoxes.push({
+          type: pb.type,
+          propIndex: propIdx1,
+          label: '#' + propIdx1 + ': ' + pb.type,
+          isLpco: true,
+          targetLayerIds: pTargetIds,
+        });
+      }
+
+      if (directBoxes.length === 0 && lpcoPropBoxes.length === 0) {
+        directBoxes.push({
+          type: se.type,
+          label: se.type,
+          isLpco: false,
+          targetLayerIds: layers.length > 0 ? [layers[0].id] : [],
+        });
+      }
+
+      seModels.push({
+        type: se.type,
+        directBoxes: directBoxes,
+        lpcoPropBoxes: lpcoPropBoxes,
+      });
+    }
+
+    trackModels.push({
+      trackId: trackId,
+      handler: handler,
+      layers: layers,
+      refs: refs,
+      seModels: seModels,
+    });
+  }
+
+  var sectionDiv = container.append('div').style('margin-bottom', '20px');
+  sectionDiv
+    .append('div')
+    .style('font-weight', 'bold')
+    .style('margin', '8px 0 6px 0')
+    .text('Track(s)');
+
+  var leftMargin = hasTref ? 120 : 30;
+  var trackColX = leftMargin;
+  var trackColW = 250;
+  var gapW = 220;
+  var boxColX = trackColX + trackColW + gapW;
+  var boxColW = 250;
+  var totalW = boxColX + boxColW + 30;
+
+  var headerH = 34;
+  var rowGap = 22;
+  var layerBoxH = 26;
+  var layerGap = 7;
+  var rightBoxH = 26;
+  var rightBoxGap = 7;
+
+  var curY = headerH + 10;
+  var trackGeomById = {};
+  var edges = [];
+
+  for (i = 0; i < trackModels.length; i++) {
+    var tm = trackModels[i];
+    var trackNodeId = 'track-' + tm.trackId;
+    var leftH =
+      tm.layers.length > 0
+        ? 34 + 10 + tm.layers.length * layerBoxH + (tm.layers.length - 1) * layerGap + 12
+        : 42;
+
+    var rightH = 0;
+    for (j = 0; j < tm.seModels.length; j++) {
+      var sem = tm.seModels[j];
+      var seH = 30 + 8;
+      if (sem.directBoxes.length > 0) {
+        seH += sem.directBoxes.length * rightBoxH + (sem.directBoxes.length - 1) * rightBoxGap + 8;
+      }
+      if (sem.lpcoPropBoxes.length > 0) {
+        seH +=
+          26 +
+          8 +
+          sem.lpcoPropBoxes.length * rightBoxH +
+          (sem.lpcoPropBoxes.length - 1) * rightBoxGap +
+          10;
+      }
+      rightH += seH + (j < tm.seModels.length - 1 ? 12 : 0);
+    }
+    if (rightH === 0) rightH = 42;
+
+    var rowH = Math.max(leftH, rightH);
+    tm.x = trackColX;
+    tm.y = curY;
+    tm.w = trackColW;
+    tm.h = leftH;
+    tm.cy = curY + leftH / 2;
+    tm.nodeId = trackNodeId;
+
+    var layerGeomById = {};
+    for (j = 0; j < tm.layers.length; j++) {
+      var ly = tm.layers[j];
+      ly.x = trackColX + 14;
+      ly.y = curY + 34 + 8 + j * (layerBoxH + layerGap);
+      ly.w = trackColW - 28;
+      ly.h = layerBoxH;
+      ly.cy = ly.y + layerBoxH / 2;
+      ly.nodeId = trackNodeId + '-layer-' + ly.id;
+      layerGeomById[ly.id] = ly;
+    }
+    tm.layerGeomById = layerGeomById;
+    trackGeomById[tm.trackId] = tm;
+
+    var rCurY = curY;
+    for (j = 0; j < tm.seModels.length; j++) {
+      var sem2 = tm.seModels[j];
+      sem2.x = boxColX;
+      sem2.y = rCurY;
+      sem2.w = boxColW;
+      var innerY = rCurY + 30 + 6;
+      for (k = 0; k < sem2.directBoxes.length; k++) {
+        var db = sem2.directBoxes[k];
+        db.x = boxColX + 12;
+        db.y = innerY;
+        db.w = boxColW - 24;
+        db.h = rightBoxH;
+        db.cy = db.y + rightBoxH / 2;
+        db.nodeId = trackNodeId + '-se-' + j + '-box-' + k;
+        innerY += rightBoxH + rightBoxGap;
+
+        if (tm.layers.length === 0) {
+          edges.push({
+            fromId: db.nodeId,
+            toId: tm.nodeId,
+            parentFrom: trackNodeId,
+            parentTo: trackNodeId,
+            x1: db.x,
+            y1: db.cy,
+            x2: tm.x + tm.w,
+            y2: tm.cy,
+            color: '#2b6cb0',
+            title: db.label + ' -> Track #' + tm.trackId,
+          });
+        } else {
+          for (var ti = 0; ti < db.targetLayerIds.length; ti++) {
+            var targetLayer = layerGeomById[db.targetLayerIds[ti]];
+            if (targetLayer) {
+              edges.push({
+                fromId: db.nodeId,
+                toId: targetLayer.nodeId,
+                parentFrom: trackNodeId,
+                parentTo: trackNodeId,
+                x1: db.x,
+                y1: db.cy,
+                x2: targetLayer.x + targetLayer.w,
+                y2: targetLayer.cy,
+                color: '#2b6cb0',
+                title: db.label + ' -> ' + targetLayer.label,
+              });
+            }
+          }
+        }
+      }
+      if (sem2.lpcoPropBoxes.length > 0) {
+        sem2.lpcoX = boxColX + 10;
+        sem2.lpcoY = innerY + 2;
+        sem2.lpcoW = boxColW - 20;
+        innerY = sem2.lpcoY + 26 + 6;
+        for (k = 0; k < sem2.lpcoPropBoxes.length; k++) {
+          var lpb = sem2.lpcoPropBoxes[k];
+          lpb.x = boxColX + 20;
+          lpb.y = innerY;
+          lpb.w = boxColW - 40;
+          lpb.h = rightBoxH;
+          lpb.cy = lpb.y + rightBoxH / 2;
+          lpb.nodeId = trackNodeId + '-se-' + j + '-lpco-' + k;
+          innerY += rightBoxH + rightBoxGap;
+
+          for (var ti2 = 0; ti2 < lpb.targetLayerIds.length; ti2++) {
+            var targetLayer2 = layerGeomById[lpb.targetLayerIds[ti2]];
+            if (targetLayer2) {
+              edges.push({
+                fromId: lpb.nodeId,
+                toId: targetLayer2.nodeId,
+                parentFrom: trackNodeId,
+                parentTo: trackNodeId,
+                x1: lpb.x,
+                y1: lpb.cy,
+                x2: targetLayer2.x + targetLayer2.w,
+                y2: targetLayer2.cy,
+                color: '#b7791f',
+                title: 'lpco ' + lpb.label + ' -> ' + targetLayer2.label,
+              });
+            }
+          }
+        }
+        sem2.lpcoH = innerY - sem2.lpcoY - rightBoxGap + 8;
+        innerY = sem2.lpcoY + sem2.lpcoH + 8;
+      }
+      sem2.h = innerY - rCurY - (sem2.lpcoPropBoxes.length > 0 ? 0 : rightBoxGap) + 6;
+      rCurY = sem2.y + sem2.h + 12;
+    }
+
+    curY += rowH + rowGap;
+  }
+
+  var totalH = curY + 10;
+  var svg = sectionDiv
+    .append('svg')
+    .attr('width', totalW)
+    .attr('height', totalH)
+    .style('max-width', '100%')
+    .style('height', 'auto')
+    .style('display', 'block')
+    .attr('viewBox', '0 0 ' + totalW + ' ' + totalH);
+
+  var defs = svg.append('defs');
+  defs
+    .append('marker')
+    .attr('id', 'assoc-arrow-tracks-blue')
+    .attr('markerWidth', 10)
+    .attr('markerHeight', 10)
+    .attr('refX', 9)
+    .attr('refY', 5)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,1 L9,5 L0,9 z')
+    .attr('fill', '#2b6cb0');
+  defs
+    .append('marker')
+    .attr('id', 'assoc-arrow-tracks-amber')
+    .attr('markerWidth', 10)
+    .attr('markerHeight', 10)
+    .attr('refX', 9)
+    .attr('refY', 5)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,1 L9,5 L0,9 z')
+    .attr('fill', '#b7791f');
+  defs
+    .append('marker')
+    .attr('id', 'ref-arrow-tracks')
+    .attr('markerWidth', 10)
+    .attr('markerHeight', 10)
+    .attr('refX', 9)
+    .attr('refY', 5)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,1 L9,5 L0,9 z')
+    .attr('fill', '#805ad5');
+
+  svg
+    .append('text')
+    .attr('x', trackColX + trackColW / 2)
+    .attr('y', 22)
+    .attr('text-anchor', 'middle')
+    .style('font-weight', 'bold')
+    .style('font-size', '13px')
+    .text('Tracks & Layers');
+  svg
+    .append('text')
+    .attr('x', boxColX + boxColW / 2)
+    .attr('y', 22)
+    .attr('text-anchor', 'middle')
+    .style('font-weight', 'bold')
+    .style('font-size', '13px')
+    .text('Sample Entry Boxes');
+
+  for (i = 0; i < trackModels.length; i++) {
+    var tmDraw = trackModels[i];
+    var tg = svg
+      .append('g')
+      .attr('class', 'assoc-node')
+      .attr('data-node-id', tmDraw.nodeId);
+    tg.append('rect')
+      .attr('x', tmDraw.x)
+      .attr('y', tmDraw.y)
+      .attr('width', tmDraw.w)
+      .attr('height', tmDraw.h)
+      .attr('rx', 6)
+      .attr('ry', 6)
+      .style('fill', '#ebf4ff')
+      .style('stroke', '#3182ce')
+      .style('stroke-width', '1.5px');
+    tg.append('text')
+      .attr('x', tmDraw.x + tmDraw.w / 2)
+      .attr('y', tmDraw.layers.length > 0 ? tmDraw.y + 20 : tmDraw.cy)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .style('font-weight', 'bold')
+      .style('font-size', '12px')
+      .style('fill', '#1a365d')
+      .text(
+        'Track #' +
+          tmDraw.trackId +
+          (tmDraw.handler ? ' (' + tmDraw.handler + ')' : ''),
+      );
+
+    for (j = 0; j < tmDraw.layers.length; j++) {
+      var lyDraw = tmDraw.layers[j];
+      var lg = svg
+        .append('g')
+        .attr('class', 'assoc-node')
+        .attr('data-node-id', lyDraw.nodeId);
+      lg.append('rect')
+        .attr('x', lyDraw.x)
+        .attr('y', lyDraw.y)
+        .attr('width', lyDraw.w)
+        .attr('height', lyDraw.h)
+        .attr('rx', 4)
+        .attr('ry', 4)
+        .style('fill', '#ffffff')
+        .style('stroke', '#2b6cb0')
+        .style('stroke-width', '1.2px');
+      lg.append('text')
+        .attr('x', lyDraw.x + lyDraw.w / 2)
+        .attr('y', lyDraw.cy)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-size', '11px')
+        .style('fill', '#2c5282')
+        .text(lyDraw.label);
+    }
+
+    for (j = 0; j < tmDraw.seModels.length; j++) {
+      var semDraw = tmDraw.seModels[j];
+      svg
+        .append('rect')
+        .attr('x', semDraw.x)
+        .attr('y', semDraw.y)
+        .attr('width', semDraw.w)
+        .attr('height', semDraw.h)
+        .attr('rx', 6)
+        .attr('ry', 6)
+        .style('fill', '#f7fafc')
+        .style('stroke', '#a0aec0')
+        .style('stroke-width', '1.2px');
+      svg
+        .append('text')
+        .attr('x', semDraw.x + semDraw.w / 2)
+        .attr('y', semDraw.y + 16)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-weight', 'bold')
+        .style('font-size', '12px')
+        .style('fill', '#2d3748')
+        .text('Sample Entry (' + semDraw.type + ')');
+
+      for (k = 0; k < semDraw.directBoxes.length; k++) {
+        var dbDraw = semDraw.directBoxes[k];
+        var dbg = svg
+          .append('g')
+          .attr('class', 'assoc-node')
+          .attr('data-node-id', dbDraw.nodeId);
+        dbg
+          .append('rect')
+          .attr('x', dbDraw.x)
+          .attr('y', dbDraw.y)
+          .attr('width', dbDraw.w)
+          .attr('height', dbDraw.h)
+          .attr('rx', 4)
+          .attr('ry', 4)
+          .style('fill', '#edf2f7')
+          .style('stroke', '#4a5568')
+          .style('stroke-width', '1.2px');
+        dbg
+          .append('text')
+          .attr('x', dbDraw.x + dbDraw.w / 2)
+          .attr('y', dbDraw.cy)
+          .attr('text-anchor', 'middle')
+          .attr('dominant-baseline', 'central')
+          .style('font-family', 'monospace')
+          .style('font-size', '12px')
+          .style('fill', '#1a202c')
+          .text(dbDraw.label);
+      }
+
+      if (semDraw.lpcoPropBoxes.length > 0) {
+        svg
+          .append('rect')
+          .attr('x', semDraw.lpcoX)
+          .attr('y', semDraw.lpcoY)
+          .attr('width', semDraw.lpcoW)
+          .attr('height', semDraw.lpcoH)
+          .attr('rx', 5)
+          .attr('ry', 5)
+          .style('fill', '#fffaf0')
+          .style('stroke', '#dd6b20')
+          .style('stroke-dasharray', '4,2')
+          .style('stroke-width', '1.2px');
+        svg
+          .append('text')
+          .attr('x', semDraw.lpcoX + semDraw.lpcoW / 2)
+          .attr('y', semDraw.lpcoY + 14)
+          .attr('text-anchor', 'middle')
+          .attr('dominant-baseline', 'central')
+          .style('font-weight', 'bold')
+          .style('font-size', '11px')
+          .style('fill', '#9c4221')
+          .text('lpco');
+
+        for (k = 0; k < semDraw.lpcoPropBoxes.length; k++) {
+          var lpbDraw = semDraw.lpcoPropBoxes[k];
+          var lpbg = svg
+            .append('g')
+            .attr('class', 'assoc-node')
+            .attr('data-node-id', lpbDraw.nodeId);
+          lpbg
+            .append('rect')
+            .attr('x', lpbDraw.x)
+            .attr('y', lpbDraw.y)
+            .attr('width', lpbDraw.w)
+            .attr('height', lpbDraw.h)
+            .attr('rx', 4)
+            .attr('ry', 4)
+            .style('fill', '#feebc8')
+            .style('stroke', '#b7791f')
+            .style('stroke-width', '1.2px');
+          lpbg
+            .append('text')
+            .attr('x', lpbDraw.x + lpbDraw.w / 2)
+            .attr('y', lpbDraw.cy)
+            .attr('text-anchor', 'middle')
+            .attr('dominant-baseline', 'central')
+            .style('font-family', 'monospace')
+            .style('font-size', '11px')
+            .style('fill', '#744210')
+            .text(lpbDraw.label);
+        }
+      }
+    }
+  }
+
+  // Draw Sample Entry Box -> Track/Layer edges
+  for (i = 0; i < edges.length; i++) {
+    var e = edges[i];
+    var dx = e.x1 - e.x2;
+    var pathD =
+      'M' +
+      e.x1 +
+      ',' +
+      e.y1 +
+      ' C' +
+      (e.x1 - dx * 0.45) +
+      ',' +
+      e.y1 +
+      ' ' +
+      (e.x2 + dx * 0.45) +
+      ',' +
+      e.y2 +
+      ' ' +
+      e.x2 +
+      ',' +
+      e.y2;
+    var markerId =
+      e.color === '#b7791f'
+        ? 'url(#assoc-arrow-tracks-amber)'
+        : 'url(#assoc-arrow-tracks-blue)';
+    var eg = svg
+      .append('g')
+      .attr('class', 'assoc-edge')
+      .attr('data-from', e.fromId)
+      .attr('data-to', e.toId)
+      .attr('data-parent-from', e.parentFrom)
+      .attr('data-parent-to', e.parentTo);
+    eg.append('title').text(e.title);
+    eg.append('path')
+      .attr('d', pathD)
+      .attr('fill', 'none')
+      .attr('data-default-width', '1.6px')
+      .style('stroke', e.color)
+      .style('stroke-width', '1.6px')
+      .attr('marker-end', markerId);
+  }
+
+  // Draw Track Reference (tref) arrows on the left
+  var refIdx = 0;
+  for (i = 0; i < trackModels.length; i++) {
+    var srcTm = trackModels[i];
+    for (j = 0; j < srcTm.refs.length; j++) {
+      var ref = srcTm.refs[j];
+      var dstTm = trackGeomById[ref.toTrackId];
+      if (!dstTm) continue;
+      var sx = srcTm.x;
+      var sy = srcTm.cy < dstTm.cy ? srcTm.cy + 4 : srcTm.cy - 4;
+      var tx = dstTm.x;
+      var ty = srcTm.cy < dstTm.cy ? dstTm.cy - 4 : dstTm.cy + 4;
+      var arcX = Math.max(12, sx - 42 - (refIdx % 3) * 24);
+      var refPath = 'M' + sx + ',' + sy + ' C' + arcX + ',' + sy + ' ' + arcX + ',' + ty + ' ' + tx + ',' + ty;
+      var rg = svg
+        .append('g')
+        .attr('class', 'assoc-edge')
+        .attr('data-from', srcTm.nodeId)
+        .attr('data-to', dstTm.nodeId)
+        .attr('data-parent-from', srcTm.nodeId)
+        .attr('data-parent-to', dstTm.nodeId);
+      rg.append('title').text(
+        'Track #' + srcTm.trackId + ' --[' + ref.type + ']--> Track #' + dstTm.trackId,
+      );
+      rg.append('path')
+        .attr('d', refPath)
+        .attr('fill', 'none')
+        .attr('data-default-width', '1.8px')
+        .style('stroke', '#805ad5')
+        .style('stroke-width', '1.8px')
+        .attr('marker-end', 'url(#ref-arrow-tracks)');
+      var lx = 0.25 * sx + 0.75 * arcX;
+      var lyMid = (sy + ty) / 2;
+      rg.append('rect')
+        .attr('x', lx - 18)
+        .attr('y', lyMid - 9)
+        .attr('width', 36)
+        .attr('height', 18)
+        .attr('rx', 3)
+        .attr('ry', 3)
+        .style('fill', '#faf5ff')
+        .style('stroke', '#805ad5')
+        .style('stroke-width', '1px');
+      rg.append('text')
+        .attr('x', lx)
+        .attr('y', lyMid)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-family', 'monospace')
+        .style('font-size', '10px')
+        .style('fill', '#553c9a')
+        .text(ref.type);
+      refIdx++;
+    }
+  }
+
+  attachAssociationHover(svg);
+}
+
+function buildItemsAssociationSvg(container, mp4boxfile) {
+  var rawItems = mp4boxfile.items;
+  if (!rawItems) return;
+  var itemList = [];
+  for (var itemId in rawItems) {
+    if (Object.prototype.hasOwnProperty.call(rawItems, itemId) && rawItems[itemId]) {
+      itemList.push(rawItems[itemId]);
+    }
+  }
+  if (itemList.length === 0) return;
+  itemList.sort(function (a, b) {
+    return a.id - b.id;
+  });
+
+  var hasIref = false;
+  var i, j, k;
+  var itemModels = [];
+  var itemModelById = {};
+
+  for (i = 0; i < itemList.length; i++) {
+    var it = itemList[i];
+    var selectedLayer = null;
+    if (it.properties && it.properties.boxes) {
+      for (j = 0; j < it.properties.boxes.length; j++) {
+        var pb = it.properties.boxes[j];
+        if (pb.type === 'lsel' && pb.layer_id !== undefined) {
+          selectedLayer = 'Layer #' + pb.layer_id + ' (lsel)';
+          break;
+        } else if (pb.type === 'a1op' && pb.op_index !== undefined) {
+          selectedLayer = 'Layer #' + pb.op_index + ' (a1op)';
+          break;
+        }
+      }
+    }
+    if (it.ref_to && it.ref_to.length > 0) {
+      hasIref = true;
+    }
+    var im = {
+      id: it.id,
+      name: it.name,
+      type: it.type === 'mime' ? it.content_type : it.type,
+      primary: !!it.primary,
+      selectedLayer: selectedLayer,
+      ref_to: it.ref_to || [],
+      rawItem: it,
+    };
+    itemModels.push(im);
+    itemModelById[it.id] = im;
+  }
+
+  var ipcoBoxes =
+    (mp4boxfile.meta &&
+      mp4boxfile.meta.iprp &&
+      mp4boxfile.meta.iprp.ipco &&
+      mp4boxfile.meta.iprp.ipco.boxes) ||
+    [];
+  var ipmas =
+    (mp4boxfile.meta && mp4boxfile.meta.iprp && mp4boxfile.meta.iprp.ipmas) || [];
+
+  var propModels = [];
+  if (ipcoBoxes.length > 0) {
+    for (i = 0; i < ipcoBoxes.length; i++) {
+      var propBox = ipcoBoxes[i];
+      if (!propBox) continue;
+      var propIdx1 = i + 1;
+      var targetItemIds = [];
+      function addTargetItemId(tid) {
+        if (targetItemIds.indexOf(tid) === -1) targetItemIds.push(tid);
+      }
+      for (j = 0; j < ipmas.length; j++) {
+        var assocs = ipmas[j].associations || [];
+        for (k = 0; k < assocs.length; k++) {
+          var assoc = assocs[k];
+          if (!itemModelById[assoc.id]) continue;
+          var props = assoc.props || [];
+          for (var pi = 0; pi < props.length; pi++) {
+            if (props[pi].property_index === propIdx1) {
+              addTargetItemId(assoc.id);
+            }
+          }
+        }
+      }
+      if (targetItemIds.length === 0) {
+        for (j = 0; j < itemModels.length; j++) {
+          var rIt = itemModels[j].rawItem;
+          if (rIt.properties && rIt.properties.boxes && rIt.properties.boxes.indexOf(propBox) !== -1) {
+            addTargetItemId(rIt.id);
+          }
+        }
+      }
+      propModels.push({
+        propIndex: propIdx1,
+        type: propBox.type,
+        label: '#' + propIdx1 + ': ' + propBox.type,
+        targetItemIds: targetItemIds,
+      });
+    }
+  } else {
+    // Fallback if ipco is not directly on meta.iprp
+    var seenBoxes = [];
+    for (i = 0; i < itemModels.length; i++) {
+      var rIt2 = itemModels[i].rawItem;
+      var pbs = (rIt2.properties && rIt2.properties.boxes) || [];
+      for (j = 0; j < pbs.length; j++) {
+        var idx = seenBoxes.indexOf(pbs[j]);
+        if (idx === -1) {
+          idx = seenBoxes.length;
+          seenBoxes.push(pbs[j]);
+          propModels.push({
+            propIndex: idx + 1,
+            type: pbs[j].type,
+            label: '#' + (idx + 1) + ': ' + pbs[j].type,
+            targetItemIds: [rIt2.id],
+          });
+        } else if (propModels[idx].targetItemIds.indexOf(rIt2.id) === -1) {
+          propModels[idx].targetItemIds.push(rIt2.id);
+        }
+      }
+    }
+  }
+
+  var sectionDiv = container.append('div').style('margin-bottom', '20px');
+  sectionDiv
+    .append('div')
+    .style('font-weight', 'bold')
+    .style('margin', '8px 0 6px 0')
+    .text('Item(s)');
+
+  var leftMargin = hasIref ? 120 : 30;
+  var itemColX = leftMargin;
+  var itemColW = 250;
+  var gapW = 220;
+  var propColX = itemColX + itemColW + gapW;
+  var propColW = 250;
+  var totalW = propColX + propColW + 30;
+
+  var headerH = 34;
+  var itemGap = 12;
+  var propBoxH = 28;
+  var propGap = 8;
+
+  var leftY = headerH + 10;
+  for (i = 0; i < itemModels.length; i++) {
+    var imGeom = itemModels[i];
+    imGeom.x = itemColX;
+    imGeom.y = leftY;
+    imGeom.w = itemColW;
+    imGeom.h = imGeom.selectedLayer ? 66 : 34;
+    imGeom.cy = imGeom.y + imGeom.h / 2;
+    imGeom.nodeId = 'item-' + imGeom.id;
+    if (imGeom.selectedLayer) {
+      imGeom.layerX = itemColX + 14;
+      imGeom.layerY = imGeom.y + 32;
+      imGeom.layerW = itemColW - 28;
+      imGeom.layerH = 24;
+      imGeom.layerCy = imGeom.layerY + 12;
+    }
+    leftY += imGeom.h + itemGap;
+  }
+
+  var rightY = headerH + 10;
+  var ipcoContainerX = propColX;
+  var ipcoContainerY = rightY;
+  var ipcoContainerW = propColW;
+  var propInnerY = ipcoContainerY + 30 + 6;
+  for (i = 0; i < propModels.length; i++) {
+    var pmGeom = propModels[i];
+    pmGeom.x = propColX + 12;
+    pmGeom.y = propInnerY;
+    pmGeom.w = propColW - 24;
+    pmGeom.h = propBoxH;
+    pmGeom.cy = pmGeom.y + propBoxH / 2;
+    pmGeom.nodeId = 'prop-' + pmGeom.propIndex;
+    propInnerY += propBoxH + propGap;
+  }
+  var ipcoContainerH =
+    propModels.length > 0 ? propInnerY - ipcoContainerY - propGap + 10 : 40;
+  rightY = ipcoContainerY + ipcoContainerH + 10;
+
+  var totalH = Math.max(leftY, rightY) + 10;
+  var svg = sectionDiv
+    .append('svg')
+    .attr('width', totalW)
+    .attr('height', totalH)
+    .style('max-width', '100%')
+    .style('height', 'auto')
+    .style('display', 'block')
+    .attr('viewBox', '0 0 ' + totalW + ' ' + totalH);
+
+  var defs = svg.append('defs');
+  defs
+    .append('marker')
+    .attr('id', 'assoc-arrow-items')
+    .attr('markerWidth', 10)
+    .attr('markerHeight', 10)
+    .attr('refX', 9)
+    .attr('refY', 5)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,1 L9,5 L0,9 z')
+    .attr('fill', '#2f855a');
+  defs
+    .append('marker')
+    .attr('id', 'ref-arrow-items')
+    .attr('markerWidth', 10)
+    .attr('markerHeight', 10)
+    .attr('refX', 9)
+    .attr('refY', 5)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,1 L9,5 L0,9 z')
+    .attr('fill', '#805ad5');
+
+  svg
+    .append('text')
+    .attr('x', itemColX + itemColW / 2)
+    .attr('y', 22)
+    .attr('text-anchor', 'middle')
+    .style('font-weight', 'bold')
+    .style('font-size', '13px')
+    .text('Items');
+  svg
+    .append('text')
+    .attr('x', propColX + propColW / 2)
+    .attr('y', 22)
+    .attr('text-anchor', 'middle')
+    .style('font-weight', 'bold')
+    .style('font-size', '13px')
+    .text('Properties');
+
+  for (i = 0; i < itemModels.length; i++) {
+    var imDraw = itemModels[i];
+    var ig = svg
+      .append('g')
+      .attr('class', 'assoc-node')
+      .attr('data-node-id', imDraw.nodeId);
+    ig.append('rect')
+      .attr('x', imDraw.x)
+      .attr('y', imDraw.y)
+      .attr('width', imDraw.w)
+      .attr('height', imDraw.h)
+      .attr('rx', 6)
+      .attr('ry', 6)
+      .style('fill', imDraw.primary ? '#e6fffa' : '#ebf4ff')
+      .style('stroke', imDraw.primary ? '#2c7a7b' : '#3182ce')
+      .style('stroke-width', imDraw.primary ? '2px' : '1.5px');
+    var itemTitle =
+      'Item #' +
+      imDraw.id +
+      ' (' +
+      imDraw.type +
+      ')' +
+      (imDraw.primary ? ' [Primary]' : '');
+    ig.append('text')
+      .attr('x', imDraw.x + imDraw.w / 2)
+      .attr('y', imDraw.selectedLayer ? imDraw.y + 18 : imDraw.cy)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .style('font-weight', 'bold')
+      .style('font-size', '12px')
+      .style('fill', '#1a365d')
+      .text(itemTitle);
+
+    if (imDraw.selectedLayer) {
+      ig.append('rect')
+        .attr('x', imDraw.layerX)
+        .attr('y', imDraw.layerY)
+        .attr('width', imDraw.layerW)
+        .attr('height', imDraw.layerH)
+        .attr('rx', 4)
+        .attr('ry', 4)
+        .style('fill', '#ffffff')
+        .style('stroke', '#2b6cb0')
+        .style('stroke-width', '1.2px');
+      ig.append('text')
+        .attr('x', imDraw.layerX + imDraw.layerW / 2)
+        .attr('y', imDraw.layerCy)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-size', '11px')
+        .style('fill', '#2c5282')
+        .text(imDraw.selectedLayer);
+    }
+  }
+
+  if (propModels.length > 0) {
+    svg
+      .append('rect')
+      .attr('x', ipcoContainerX)
+      .attr('y', ipcoContainerY)
+      .attr('width', ipcoContainerW)
+      .attr('height', ipcoContainerH)
+      .attr('rx', 6)
+      .attr('ry', 6)
+      .style('fill', '#f7fafc')
+      .style('stroke', '#a0aec0')
+      .style('stroke-width', '1.2px');
+    svg
+      .append('text')
+      .attr('x', ipcoContainerX + ipcoContainerW / 2)
+      .attr('y', ipcoContainerY + 16)
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .style('font-weight', 'bold')
+      .style('font-size', '12px')
+      .style('fill', '#2d3748')
+      .text('Item Properties (ipco)');
+
+    for (i = 0; i < propModels.length; i++) {
+      var pmDraw = propModels[i];
+      var pg = svg
+        .append('g')
+        .attr('class', 'assoc-node')
+        .attr('data-node-id', pmDraw.nodeId);
+      pg.append('rect')
+        .attr('x', pmDraw.x)
+        .attr('y', pmDraw.y)
+        .attr('width', pmDraw.w)
+        .attr('height', pmDraw.h)
+        .attr('rx', 4)
+        .attr('ry', 4)
+        .style('fill', '#f0fff4')
+        .style('stroke', '#2f855a')
+        .style('stroke-width', '1.2px');
+      pg.append('text')
+        .attr('x', pmDraw.x + pmDraw.w / 2)
+        .attr('y', pmDraw.cy)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-family', 'monospace')
+        .style('font-size', '12px')
+        .style('fill', '#22543d')
+        .text(pmDraw.label);
+
+      for (j = 0; j < pmDraw.targetItemIds.length; j++) {
+        var targetItem = itemModelById[pmDraw.targetItemIds[j]];
+        if (!targetItem) continue;
+        var sx = pmDraw.x;
+        var sy = pmDraw.cy;
+        var tx = targetItem.x + targetItem.w;
+        var ty = targetItem.cy;
+        var dx = sx - tx;
+        var pathD =
+          'M' +
+          sx +
+          ',' +
+          sy +
+          ' C' +
+          (sx - dx * 0.45) +
+          ',' +
+          sy +
+          ' ' +
+          (tx + dx * 0.45) +
+          ',' +
+          ty +
+          ' ' +
+          tx +
+          ',' +
+          ty;
+        var eg = svg
+          .append('g')
+          .attr('class', 'assoc-edge')
+          .attr('data-from', pmDraw.nodeId)
+          .attr('data-to', targetItem.nodeId)
+          .attr('data-parent-from', pmDraw.nodeId)
+          .attr('data-parent-to', targetItem.nodeId);
+        eg.append('title').text(pmDraw.label + ' -> Item #' + targetItem.id);
+        eg.append('path')
+          .attr('d', pathD)
+          .attr('fill', 'none')
+          .attr('data-default-width', '1.6px')
+          .style('stroke', '#2f855a')
+          .style('stroke-width', '1.6px')
+          .attr('marker-end', 'url(#assoc-arrow-items)');
+      }
+    }
+  }
+
+  // Draw Item Reference (iref) arrows on the left
+  var irefIdx = 0;
+  for (i = 0; i < itemModels.length; i++) {
+    var srcIm = itemModels[i];
+    for (j = 0; j < srcIm.ref_to.length; j++) {
+      var ref = srcIm.ref_to[j];
+      var dstIm = itemModelById[ref.id];
+      if (!dstIm) continue;
+      var sx2 = srcIm.x;
+      var sy2 = srcIm.cy < dstIm.cy ? srcIm.cy + 4 : srcIm.cy - 4;
+      var tx2 = dstIm.x;
+      var ty2 = srcIm.cy < dstIm.cy ? dstIm.cy - 4 : dstIm.cy + 4;
+      var arcX = Math.max(12, sx2 - 42 - (irefIdx % 3) * 24);
+      var refPath =
+        'M' + sx2 + ',' + sy2 + ' C' + arcX + ',' + sy2 + ' ' + arcX + ',' + ty2 + ' ' + tx2 + ',' + ty2;
+      var rg = svg
+        .append('g')
+        .attr('class', 'assoc-edge')
+        .attr('data-from', srcIm.nodeId)
+        .attr('data-to', dstIm.nodeId)
+        .attr('data-parent-from', srcIm.nodeId)
+        .attr('data-parent-to', dstIm.nodeId);
+      rg.append('title').text(
+        'Item #' + srcIm.id + ' --[' + ref.type + ']--> Item #' + dstIm.id,
+      );
+      rg.append('path')
+        .attr('d', refPath)
+        .attr('fill', 'none')
+        .attr('data-default-width', '1.8px')
+        .style('stroke', '#805ad5')
+        .style('stroke-width', '1.8px')
+        .attr('marker-end', 'url(#ref-arrow-items)');
+      var lx = 0.25 * sx2 + 0.75 * arcX;
+      var lyMid = (sy2 + ty2) / 2;
+      rg.append('rect')
+        .attr('x', lx - 18)
+        .attr('y', lyMid - 9)
+        .attr('width', 36)
+        .attr('height', 18)
+        .attr('rx', 3)
+        .attr('ry', 3)
+        .style('fill', '#faf5ff')
+        .style('stroke', '#805ad5')
+        .style('stroke-width', '1px');
+      rg.append('text')
+        .attr('x', lx)
+        .attr('y', lyMid)
+        .attr('text-anchor', 'middle')
+        .attr('dominant-baseline', 'central')
+        .style('font-family', 'monospace')
+        .style('font-size', '10px')
+        .style('fill', '#553c9a')
+        .text(ref.type);
+      irefIdx++;
+    }
+  }
+
+  attachAssociationHover(svg);
+}
+
+function buildAssociationView(mp4boxfile) {
+  var container = d3.select('#associationview');
+  container.html('');
+  if (!mp4boxfile) return;
+  buildTracksAssociationSvg(container, mp4boxfile);
+  buildItemsAssociationSvg(container, mp4boxfile);
 }
 
 function buildItemTable(items) {

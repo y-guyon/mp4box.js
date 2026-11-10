@@ -109,6 +109,7 @@ export class av01SampleEntry extends VisualSampleEntry {
 }
 
 const av2Base32Char = (value: number): string => (value & 0x1f).toString(32).toUpperCase();
+const av2TierChar = (tier: number): string => (tier ? 'H' : 'M');
 
 function combineAv2Profiles(a: number, b: number): number {
   if (a === b) return a;
@@ -159,7 +160,17 @@ export class av2ESampleEntry extends VisualSampleEntry {
         maxBitDepthIdc = bd;
       }
     }
-    return `${baseCodec}.${av2Base32Char(maxProfile)}${av2Base32Char(maxLevel)}${av2Base32Char(
+    const msdos = this.av2C?.entries?.filter(
+      e => e.obu_type === 20 && e.multistream_profile_idc !== undefined,
+    );
+    if (msdos) {
+      for (const m of msdos) {
+        maxProfile = combineAv2Profiles(maxProfile, m.multistream_profile_idc ?? 0);
+        maxLevel = Math.max(maxLevel, m.multistream_level_idx ?? 0);
+        maxTier = Math.max(maxTier, m.multistream_tier ?? 0);
+      }
+    }
+    return `${baseCodec}.${av2Base32Char(maxProfile)}${av2Base32Char(maxLevel)}${av2TierChar(
       maxTier,
     )}${av2Base32Char(maxBitDepthIdc)}`;
   }
@@ -180,7 +191,7 @@ export class av2eSampleEntry extends VisualSampleEntry {
     }
     return `${baseCodec}.${av2Base32Char(this.av2c.max_profile_idc)}${av2Base32Char(
       this.av2c.max_level_idx,
-    )}${av2Base32Char(this.av2c.max_tier)}${av2Base32Char(this.av2c.max_bit_depth_idc)}`;
+    )}${av2TierChar(this.av2c.max_tier)}${av2Base32Char(this.av2c.max_bit_depth_idc)}`;
   }
 }
 

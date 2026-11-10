@@ -111,7 +111,7 @@ describe('Codec strings', () => {
       max_bit_depth_idc: 2,
     } as av2cBox;
 
-    expect(entry.getCodec()).toBe('av2e.VA12');
+    expect(entry.getCodec()).toBe('av2e.VAH2');
   });
 
   it('should format av2E codec string using AV2 profile feature lattice', () => {
@@ -135,6 +135,6 @@ describe('Codec strings', () => {
       ],
     } as av2CBox;
 
-    expect(entry.getCodec()).toBe('av2E.5810');
+    expect(entry.getCodec()).toBe('av2E.58H0');
   });
 });

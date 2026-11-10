@@ -1,8 +1,11 @@
 import {
+  av2ESampleEntry,
+  av2eSampleEntry,
   mp4aSampleEntry,
   mp4vSampleEntry,
   vp09SampleEntry,
 } from '../src/boxes/sampleentries/sampleentry';
+import type { av2CBox, av2cBox } from '../src/boxes/av2C';
 import type { esdsBox } from '../src/boxes/esds';
 import type { waveBox } from '../src/boxes/qt/wave';
 import type { vpcCBox } from '../src/boxes/vpcC';
@@ -96,5 +99,42 @@ describe('Codec strings', () => {
     entry.esds = makeVisualEsds(0x61);
 
     expect(entry.getCodec()).toBe('mp4v.61');
+  });
+
+  it('should format av2e codec string in base32', () => {
+    const entry = new av2eSampleEntry();
+    entry.av2c = {
+      max_num_streams_minus1: 0,
+      max_profile_idc: 31,
+      max_level_idx: 10,
+      max_tier: 1,
+      max_bit_depth_idc: 2,
+    } as av2cBox;
+
+    expect(entry.getCodec()).toBe('av2e.VA12');
+  });
+
+  it('should format av2E codec string using AV2 profile feature lattice', () => {
+    const entry = new av2ESampleEntry();
+    entry.av2C = {
+      entries: [
+        {
+          obu_type: 1,
+          seq_profile_idc: 3,
+          seq_level_idx: 4,
+          seq_tier: 0,
+          bit_depth_idc: 1,
+        },
+        {
+          obu_type: 1,
+          seq_profile_idc: 4,
+          seq_level_idx: 8,
+          seq_tier: 1,
+          bit_depth_idc: 0,
+        },
+      ],
+    } as av2CBox;
+
+    expect(entry.getCodec()).toBe('av2E.5810');
   });
 });

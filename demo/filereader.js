@@ -42,6 +42,10 @@ function finalizeAnalyzerUI(fileobj, loadbutton, success) {
 function buildItemTable(items) {
   var html;
   var i, j;
+  if (!items || items.length === 0) {
+    $('#itemview').html('');
+    return;
+  }
   html = '<table>';
   html += '<thead>';
   html += '<tr>';

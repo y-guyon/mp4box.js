@@ -263,6 +263,10 @@ function getTrackListInfo(tracks, type) {
 var displaySourceBuffer = true;
 function displayMovieInfo(info, div, _displaySourceBuffer) {
   if (_displaySourceBuffer !== undefined) displaySourceBuffer = _displaySourceBuffer;
+  if (!info.hasMoov) {
+    div.innerHTML = '';
+    return;
+  }
   var html = 'Movie Info';
   var fileLength = 0;
   if (typeof downloader !== 'undefined') {

@@ -2,6 +2,7 @@ import { ContainerBox } from '#/containerBox';
 import type { MultiBufferStream } from '#/buffer';
 import { Log } from '#/log';
 import type { av1CBox } from '../av1C';
+import type { av2CBox, av2cBox } from '../av2C';
 import type { avcCBox } from '../avcC';
 import type { hvcCBox } from '../hvcC';
 import type { lvcCBox } from '../lvcC';
@@ -163,6 +164,8 @@ export class TextSampleEntry extends SampleEntry {}
 //Base SampleEntry types for Audio and Video with specific parsing
 export class VisualSampleEntry extends SampleEntry {
   av1C?: av1CBox;
+  av2C?: av2CBox;
+  av2c?: av2cBox;
   avcC?: avcCBox;
   hvcC?: hvcCBox;
   lvcC?: lvcCBox;

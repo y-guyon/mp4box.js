@@ -1,4 +1,5 @@
 import { av1CBox } from '#/boxes/av1C';
+import { av2CBox, av2cBox } from '#/boxes/av2C';
 import { avcCBox } from '#/boxes/avcC';
 import { av3cBox } from '#/boxes/av3c';
 import { dca3Box } from '#/boxes/dca3';
@@ -104,6 +105,82 @@ export class av01SampleEntry extends VisualSampleEntry {
       '.' +
       bitdepth
     ); //+"."+this.av1C.monochrome+"."+this.av1C.chroma_subsampling_x+""+this.av1C.chroma_subsampling_y+""+this.av1C.chroma_sample_position;
+  }
+}
+
+const av2Base32Char = (value: number): string => (value & 0x1f).toString(32).toUpperCase();
+
+function combineAv2Profiles(a: number, b: number): number {
+  if (a === b) return a;
+  const lo = Math.min(a, b);
+  const hi = Math.max(a, b);
+  if (hi >= 5) return hi;
+  if (lo <= 1) return hi;
+  return 5;
+}
+
+function av2BitDepthRank(bitDepthIdc: number): number {
+  switch (bitDepthIdc) {
+    case 1:
+      return 8;
+    case 0:
+      return 10;
+    case 2:
+      return 12;
+    default:
+      return 12 + bitDepthIdc;
+  }
+}
+
+export class av2ESampleEntry extends VisualSampleEntry {
+  av2C: av2CBox;
+  av2Cs: Array<av2CBox>;
+
+  static override readonly fourcc = 'av2E' as const;
+  box_name = 'OutOfBandAV2SampleEntry' as const;
+
+  /** @bundle box-codecs.js */
+  getCodec(): string {
+    const baseCodec = super.getCodec();
+    const obus = this.av2C?.entries?.filter(e => e.obu_type === 1 && e.seq_profile_idc !== undefined);
+    if (!obus || obus.length === 0) {
+      return baseCodec;
+    }
+    let maxProfile = obus[0].seq_profile_idc ?? 0;
+    let maxLevel = obus[0].seq_level_idx ?? 0;
+    let maxTier = obus[0].seq_tier ?? 0;
+    let maxBitDepthIdc = obus[0].bit_depth_idc ?? 1;
+    for (let i = 1; i < obus.length; i++) {
+      maxProfile = combineAv2Profiles(maxProfile, obus[i].seq_profile_idc ?? 0);
+      maxLevel = Math.max(maxLevel, obus[i].seq_level_idx ?? 0);
+      maxTier = Math.max(maxTier, obus[i].seq_tier ?? 0);
+      const bd = obus[i].bit_depth_idc ?? 1;
+      if (av2BitDepthRank(bd) > av2BitDepthRank(maxBitDepthIdc)) {
+        maxBitDepthIdc = bd;
+      }
+    }
+    return `${baseCodec}.${av2Base32Char(maxProfile)}${av2Base32Char(maxLevel)}${av2Base32Char(
+      maxTier,
+    )}${av2Base32Char(maxBitDepthIdc)}`;
+  }
+}
+
+export class av2eSampleEntry extends VisualSampleEntry {
+  av2c: av2cBox;
+  av2cs: Array<av2cBox>;
+
+  static override readonly fourcc = 'av2e' as const;
+  box_name = 'InBandAV2SampleEntry' as const;
+
+  /** @bundle box-codecs.js */
+  getCodec(): string {
+    const baseCodec = super.getCodec();
+    if (!this.av2c) {
+      return baseCodec;
+    }
+    return `${baseCodec}.${av2Base32Char(this.av2c.max_profile_idc)}${av2Base32Char(
+      this.av2c.max_level_idx,
+    )}${av2Base32Char(this.av2c.max_tier)}${av2Base32Char(this.av2c.max_bit_depth_idc)}`;
   }
 }
 

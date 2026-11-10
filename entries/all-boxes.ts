@@ -3,6 +3,7 @@ export * from '#/boxes/a1op';
 export * from '#/boxes/amve';
 export * from '#/boxes/auxC';
 export * from '#/boxes/av1C';
+export * from '#/boxes/av2C';
 export * from '#/boxes/av3c';
 export * from '#/boxes/avcC';
 export * from '#/boxes/btrt';

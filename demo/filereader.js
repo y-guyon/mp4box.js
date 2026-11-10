@@ -1674,7 +1674,8 @@ function buildItemTable(items) {
     $('#itemview').html('');
     return;
   }
-  html = '<table>';
+  html = 'Item(s) info';
+  html += '<table>';
   html += '<thead>';
   html += '<tr>';
   html += '<th>ID</th>';

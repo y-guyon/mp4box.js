@@ -142,7 +142,7 @@ function parseFile(fileobj, progressbar, progresslabel, loadbutton, finalizeUI) 
   var readBlock = null;
   var startDate = new Date();
 
-  fileobj.mp4boxfile = MP4Box.createFile(false);
+  fileobj.mp4boxfile = MP4Box.createFile(true);
 
   fileobj.mp4boxfile.onError = function (module, msg) {
     throw new Error('Failed to parse ISOBMFF file: [' + module + '] ' + msg);
@@ -196,7 +196,7 @@ function httpload(fileobj, progressbar, progresslabel, loadbutton, finalizeUI) {
   var startDate = new Date();
   var nextStart = 0;
 
-  fileobj.mp4boxfile = MP4Box.createFile(false);
+  fileobj.mp4boxfile = MP4Box.createFile(true);
 
   downloader.setCallback(function (response, end, error) {
     if (response) {

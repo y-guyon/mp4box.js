@@ -587,6 +587,57 @@ var ASSOC_BOX_COLORS = [
   '#744210',
 ];
 
+function selectBoxInTreeView(targetBox, fallbackBox) {
+  if ((!targetBox && !fallbackBox) || !file || !file.fancytree) return;
+
+  var boxViewIndex = $('#resulttabs > ul > li > a[href="#boxview"]').parent().index();
+  $('#resulttabs').tabs('option', 'active', boxViewIndex >= 0 ? boxViewIndex : 1);
+  var treeViewIndex = $('#boxview > ul > li > a[href="#boxtreeview"]').parent().index();
+  $('#boxview').tabs('option', 'active', treeViewIndex >= 0 ? treeViewIndex : 0);
+
+  function findNodeForBox(box) {
+    if (!box) return null;
+    var matched = null;
+    file.fancytree.visit(function (node) {
+      if (node.data && node.data.box === box) {
+        matched = node;
+        return false;
+      }
+    });
+    if (!matched && box.start !== undefined && box.type) {
+      file.fancytree.visit(function (node) {
+        if (
+          node.data &&
+          node.data.box &&
+          node.data.box.start === box.start &&
+          node.data.box.type === box.type
+        ) {
+          matched = node;
+          return false;
+        }
+      });
+    }
+    return matched;
+  }
+
+  var targetNode = findNodeForBox(targetBox) || findNodeForBox(fallbackBox);
+  if (!targetNode) return;
+
+  var parents = targetNode.getParentList(false, false);
+  for (var i = 0; i < parents.length; i++) {
+    if (!parents[i].isExpanded()) {
+      parents[i].setExpanded(true, { noAnimation: true });
+    }
+  }
+
+  if (targetNode.isActive()) {
+    targetNode.setActive(false);
+  }
+  targetNode.setActive(true);
+  if (typeof targetNode.scrollIntoView === 'function') {
+    targetNode.scrollIntoView(false);
+  }
+}
 function buildTracksAssociationSvg(container, mp4boxfile) {
   var traks = (mp4boxfile.moov && mp4boxfile.moov.traks) || [];
   if (traks.length === 0) return;
@@ -695,6 +746,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           label: cb.type,
           isLpco: false,
           targetLayerIds: targetLayerIds,
+          box: cb,
+          fallbackBox: se,
         });
       }
 
@@ -728,6 +781,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           label: '#' + propIdx1 + ': ' + pb.type,
           isLpco: true,
           targetLayerIds: pTargetIds,
+          box: pb,
+          fallbackBox: lpcoBox || se,
         });
       }
 
@@ -737,11 +792,15 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           label: se.type,
           isLpco: false,
           targetLayerIds: layers.length > 0 ? [layers[0].id] : [],
+          box: se,
+          fallbackBox: null,
         });
       }
 
       seModels.push({
         type: se.type,
+        box: se,
+        lpcoBox: lpcoBox,
         directBoxes: directBoxes,
         lpcoPropBoxes: lpcoPropBoxes,
       });
@@ -1045,7 +1104,18 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
 
     for (j = 0; j < tmDraw.seModels.length; j++) {
       var semDraw = tmDraw.seModels[j];
-      svg
+      var seg = svg
+        .append('g')
+        .style('cursor', 'pointer')
+        .on(
+          'click',
+          (function (b) {
+            return function () {
+              selectBoxInTreeView(b, null);
+            };
+          })(semDraw.box),
+        );
+      seg
         .append('rect')
         .attr('x', semDraw.x)
         .attr('y', semDraw.y)
@@ -1056,7 +1126,7 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
         .style('fill', '#f7fafc')
         .style('stroke', '#a0aec0')
         .style('stroke-width', '1.2px');
-      svg
+      seg
         .append('text')
         .attr('x', semDraw.x + semDraw.w / 2)
         .attr('y', semDraw.y + 16)
@@ -1072,7 +1142,17 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
         var dbg = svg
           .append('g')
           .attr('class', 'assoc-node')
-          .attr('data-node-id', dbDraw.nodeId);
+          .attr('data-node-id', dbDraw.nodeId)
+          .style('cursor', 'pointer')
+          .on(
+            'click',
+            (function (b, fb) {
+              return function () {
+                if (d3.event) d3.event.stopPropagation();
+                selectBoxInTreeView(b, fb);
+              };
+            })(dbDraw.box, dbDraw.fallbackBox),
+          );
         dbg
           .append('rect')
           .attr('x', dbDraw.x)
@@ -1097,7 +1177,19 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
       }
 
       if (semDraw.lpcoPropBoxes.length > 0) {
-        svg
+        var lpcog = svg
+          .append('g')
+          .style('cursor', 'pointer')
+          .on(
+            'click',
+            (function (b, fb) {
+              return function () {
+                if (d3.event) d3.event.stopPropagation();
+                selectBoxInTreeView(b, fb);
+              };
+            })(semDraw.lpcoBox, semDraw.box),
+          );
+        lpcog
           .append('rect')
           .attr('x', semDraw.lpcoX)
           .attr('y', semDraw.lpcoY)
@@ -1109,7 +1201,7 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           .style('stroke', '#dd6b20')
           .style('stroke-dasharray', '4,2')
           .style('stroke-width', '1.2px');
-        svg
+        lpcog
           .append('text')
           .attr('x', semDraw.lpcoX + semDraw.lpcoW / 2)
           .attr('y', semDraw.lpcoY + 14)
@@ -1125,7 +1217,17 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           var lpbg = svg
             .append('g')
             .attr('class', 'assoc-node')
-            .attr('data-node-id', lpbDraw.nodeId);
+            .attr('data-node-id', lpbDraw.nodeId)
+            .style('cursor', 'pointer')
+            .on(
+              'click',
+              (function (b, fb) {
+                return function () {
+                  if (d3.event) d3.event.stopPropagation();
+                  selectBoxInTreeView(b, fb);
+                };
+              })(lpbDraw.box, lpbDraw.fallbackBox),
+            );
           lpbg
             .append('rect')
             .attr('x', lpbDraw.x)
@@ -1345,6 +1447,7 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
         type: propBox.type,
         label: '#' + propIdx1 + ': ' + propBox.type,
         targetItemIds: targetItemIds,
+        box: propBox,
       });
     }
   } else {
@@ -1363,6 +1466,7 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
             type: pbs[j].type,
             label: '#' + (idx + 1) + ': ' + pbs[j].type,
             targetItemIds: [rIt2.id],
+            box: pbs[j],
           });
         } else if (propModels[idx].targetItemIds.indexOf(rIt2.id) === -1) {
           propModels[idx].targetItemIds.push(rIt2.id);
@@ -1538,7 +1642,17 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
   }
 
   if (propModels.length > 0) {
-    svg
+    var ipcoBoxObj =
+      mp4boxfile.meta && mp4boxfile.meta.iprp && mp4boxfile.meta.iprp.ipco
+        ? mp4boxfile.meta.iprp.ipco
+        : null;
+    var ipcog = svg
+      .append('g')
+      .style('cursor', ipcoBoxObj ? 'pointer' : 'default')
+      .on('click', function () {
+        if (ipcoBoxObj) selectBoxInTreeView(ipcoBoxObj, null);
+      });
+    ipcog
       .append('rect')
       .attr('x', ipcoContainerX)
       .attr('y', ipcoContainerY)
@@ -1549,7 +1663,7 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
       .style('fill', '#f7fafc')
       .style('stroke', '#a0aec0')
       .style('stroke-width', '1.2px');
-    svg
+    ipcog
       .append('text')
       .attr('x', ipcoContainerX + ipcoContainerW / 2)
       .attr('y', ipcoContainerY + 16)
@@ -1567,7 +1681,17 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
       var pg = svg
         .append('g')
         .attr('class', 'assoc-node')
-        .attr('data-node-id', pmDraw.nodeId);
+        .attr('data-node-id', pmDraw.nodeId)
+        .style('cursor', 'pointer')
+        .on(
+          'click',
+          (function (b, fb) {
+            return function () {
+              if (d3.event) d3.event.stopPropagation();
+              selectBoxInTreeView(b, fb);
+            };
+          })(pmDraw.box, ipcoBoxObj),
+        );
       pg.append('rect')
         .attr('x', pmDraw.x)
         .attr('y', pmDraw.y)

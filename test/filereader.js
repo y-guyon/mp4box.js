@@ -572,6 +572,21 @@ function attachAssociationHover(svg) {
     });
 }
 
+var ASSOC_BOX_COLORS = [
+  '#2b6cb0',
+  '#c53030',
+  '#2f855a',
+  '#b7791f',
+  '#6b46c1',
+  '#00838f',
+  '#d53f8c',
+  '#dd6b20',
+  '#2c5282',
+  '#822727',
+  '#285e61',
+  '#744210',
+];
+
 function buildTracksAssociationSvg(container, mp4boxfile) {
   var traks = (mp4boxfile.moov && mp4boxfile.moov.traks) || [];
   if (traks.length === 0) return;
@@ -766,6 +781,7 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
   var curY = headerH + 10;
   var trackGeomById = {};
   var edges = [];
+  var boxColorIdx = 0;
 
   for (i = 0; i < trackModels.length; i++) {
     var tm = trackModels[i];
@@ -831,6 +847,9 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
         db.h = rightBoxH;
         db.cy = db.y + rightBoxH / 2;
         db.nodeId = trackNodeId + '-se-' + j + '-box-' + k;
+        db.colorIdx = boxColorIdx % ASSOC_BOX_COLORS.length;
+        db.color = ASSOC_BOX_COLORS[db.colorIdx];
+        boxColorIdx++;
         innerY += rightBoxH + rightBoxGap;
 
         if (tm.layers.length === 0) {
@@ -843,7 +862,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
             y1: db.cy,
             x2: tm.x + tm.w,
             y2: tm.cy,
-            color: '#2b6cb0',
+            color: db.color,
+            colorIdx: db.colorIdx,
             title: db.label + ' -> Track #' + tm.trackId,
           });
         } else {
@@ -859,7 +879,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
                 y1: db.cy,
                 x2: targetLayer.x + targetLayer.w,
                 y2: targetLayer.cy,
-                color: '#2b6cb0',
+                color: db.color,
+                colorIdx: db.colorIdx,
                 title: db.label + ' -> ' + targetLayer.label,
               });
             }
@@ -879,6 +900,9 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           lpb.h = rightBoxH;
           lpb.cy = lpb.y + rightBoxH / 2;
           lpb.nodeId = trackNodeId + '-se-' + j + '-lpco-' + k;
+          lpb.colorIdx = boxColorIdx % ASSOC_BOX_COLORS.length;
+          lpb.color = ASSOC_BOX_COLORS[lpb.colorIdx];
+          boxColorIdx++;
           innerY += rightBoxH + rightBoxGap;
 
           for (var ti2 = 0; ti2 < lpb.targetLayerIds.length; ti2++) {
@@ -893,7 +917,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
                 y1: lpb.cy,
                 x2: targetLayer2.x + targetLayer2.w,
                 y2: targetLayer2.cy,
-                color: '#b7791f',
+                color: lpb.color,
+                colorIdx: lpb.colorIdx,
                 title: 'lpco ' + lpb.label + ' -> ' + targetLayer2.label,
               });
             }
@@ -920,28 +945,19 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
     .attr('viewBox', '0 0 ' + totalW + ' ' + totalH);
 
   var defs = svg.append('defs');
-  defs
-    .append('marker')
-    .attr('id', 'assoc-arrow-tracks-blue')
-    .attr('markerWidth', 10)
-    .attr('markerHeight', 10)
-    .attr('refX', 9)
-    .attr('refY', 5)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,1 L9,5 L0,9 z')
-    .attr('fill', '#2b6cb0');
-  defs
-    .append('marker')
-    .attr('id', 'assoc-arrow-tracks-amber')
-    .attr('markerWidth', 10)
-    .attr('markerHeight', 10)
-    .attr('refX', 9)
-    .attr('refY', 5)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,1 L9,5 L0,9 z')
-    .attr('fill', '#b7791f');
+  for (var ci = 0; ci < ASSOC_BOX_COLORS.length; ci++) {
+    defs
+      .append('marker')
+      .attr('id', 'assoc-arrow-tracks-' + ci)
+      .attr('markerWidth', 10)
+      .attr('markerHeight', 10)
+      .attr('refX', 9)
+      .attr('refY', 5)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,1 L9,5 L0,9 z')
+      .attr('fill', ASSOC_BOX_COLORS[ci]);
+  }
   defs
     .append('marker')
     .attr('id', 'ref-arrow-tracks')
@@ -1066,8 +1082,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
           .attr('rx', 4)
           .attr('ry', 4)
           .style('fill', '#edf2f7')
-          .style('stroke', '#4a5568')
-          .style('stroke-width', '1.2px');
+          .style('stroke', dbDraw.color)
+          .style('stroke-width', '1.5px');
         dbg
           .append('text')
           .attr('x', dbDraw.x + dbDraw.w / 2)
@@ -1119,8 +1135,8 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
             .attr('rx', 4)
             .attr('ry', 4)
             .style('fill', '#feebc8')
-            .style('stroke', '#b7791f')
-            .style('stroke-width', '1.2px');
+            .style('stroke', lpbDraw.color)
+            .style('stroke-width', '1.5px');
           lpbg
             .append('text')
             .attr('x', lpbDraw.x + lpbDraw.w / 2)
@@ -1157,10 +1173,7 @@ function buildTracksAssociationSvg(container, mp4boxfile) {
       e.x2 +
       ',' +
       e.y2;
-    var markerId =
-      e.color === '#b7791f'
-        ? 'url(#assoc-arrow-tracks-amber)'
-        : 'url(#assoc-arrow-tracks-blue)';
+    var markerId = 'url(#assoc-arrow-tracks-' + e.colorIdx + ')';
     var eg = svg
       .append('g')
       .attr('class', 'assoc-edge')
@@ -1427,17 +1440,19 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
     .attr('viewBox', '0 0 ' + totalW + ' ' + totalH);
 
   var defs = svg.append('defs');
-  defs
-    .append('marker')
-    .attr('id', 'assoc-arrow-items')
-    .attr('markerWidth', 10)
-    .attr('markerHeight', 10)
-    .attr('refX', 9)
-    .attr('refY', 5)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,1 L9,5 L0,9 z')
-    .attr('fill', '#2f855a');
+  for (var pci = 0; pci < ASSOC_BOX_COLORS.length; pci++) {
+    defs
+      .append('marker')
+      .attr('id', 'assoc-arrow-items-' + pci)
+      .attr('markerWidth', 10)
+      .attr('markerHeight', 10)
+      .attr('refX', 9)
+      .attr('refY', 5)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,1 L9,5 L0,9 z')
+      .attr('fill', ASSOC_BOX_COLORS[pci]);
+  }
   defs
     .append('marker')
     .attr('id', 'ref-arrow-items')
@@ -1547,6 +1562,8 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
 
     for (i = 0; i < propModels.length; i++) {
       var pmDraw = propModels[i];
+      var pColorIdx = i % ASSOC_BOX_COLORS.length;
+      var pColor = ASSOC_BOX_COLORS[pColorIdx];
       var pg = svg
         .append('g')
         .attr('class', 'assoc-node')
@@ -1559,8 +1576,8 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
         .attr('rx', 4)
         .attr('ry', 4)
         .style('fill', '#f0fff4')
-        .style('stroke', '#2f855a')
-        .style('stroke-width', '1.2px');
+        .style('stroke', pColor)
+        .style('stroke-width', '1.5px');
       pg.append('text')
         .attr('x', pmDraw.x + pmDraw.w / 2)
         .attr('y', pmDraw.cy)
@@ -1608,9 +1625,9 @@ function buildItemsAssociationSvg(container, mp4boxfile) {
           .attr('d', pathD)
           .attr('fill', 'none')
           .attr('data-default-width', '1.6px')
-          .style('stroke', '#2f855a')
+          .style('stroke', pColor)
           .style('stroke-width', '1.6px')
-          .attr('marker-end', 'url(#assoc-arrow-items)');
+          .attr('marker-end', 'url(#assoc-arrow-items-' + pColorIdx + ')');
       }
     }
   }

@@ -67,6 +67,22 @@ function peekBytesFromFile(mp4boxfile, offset, size) {
             return new Uint8Array(buf, offset - bStart, size);
           }
         }
+        if (mdatStart <= offset && offset + size <= mdat.start + mdat.size) {
+          var out = new Uint8Array(size);
+          var copied = 0;
+          for (var j2 = 0; j2 < mdat.stream.buffers.length && copied < size; j2++) {
+            var buf2 = mdat.stream.buffers[j2];
+            var bStart2 = mdatStart + buf2.fileStart;
+            var bEnd2 = bStart2 + buf2.byteLength;
+            var curOff = offset + copied;
+            if (curOff >= bStart2 && curOff < bEnd2) {
+              var take = Math.min(size - copied, bEnd2 - curOff);
+              out.set(new Uint8Array(buf2, curOff - bStart2, take), copied);
+              copied += take;
+            }
+          }
+          if (copied === size) return out;
+        }
       }
     }
   }

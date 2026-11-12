@@ -36,10 +36,29 @@ function createLoadBar(parent, label, id, fileobj, finalizeUI) {
     fileobj.objectToLoad = loadbarfileinput[0].files[0];
     fileobj.objectIsFile = true;
   };
-  loadbarfileinput.width(500);
+  loadbarfileinput.css({
+    'field-sizing': 'content',
+    'max-width': 'calc(100% - 30px)',
+    'vertical-align': 'middle',
+  });
   loadbarfileinput.button();
 
+  var copyfilenamebutton = $(
+    '<button type="button" id="' +
+      id +
+      '_copyfilename" title="Copy file name" style="margin-left: 4px; padding: 2px 4px; font-size: 10px; line-height: 1; vertical-align: middle;"><svg width="10" height="10" viewBox="0 0 16 16" style="display: block;"><path d="M5 2h8a1 1 0 0 1 1 1v9h-1.5V3.5H5V2zm-2 3h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm.5 1.5v7h7v-7h-7z" style="fill: currentColor;"/></svg></button>',
+  );
+  copyfilenamebutton.on('click', function () {
+    var selectedFile =
+      (loadbarfileinput[0].files && loadbarfileinput[0].files[0]) ||
+      (fileobj.objectIsFile ? fileobj.objectToLoad : null);
+    if (selectedFile && selectedFile.name && navigator.clipboard) {
+      navigator.clipboard.writeText(selectedFile.name);
+    }
+  });
+
   loadbarfileswitch.append(loadbarfileinput);
+  loadbarfileswitch.append(copyfilenamebutton);
 
   var loadbarurlswitch = $('<div></div>');
   loadbarurlswitch.attr('id', id + '_tabs-url');
